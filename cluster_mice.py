@@ -196,7 +196,7 @@ shared_path = '/your_path/25um_280_to_290_slices/misc_files_from_urbana/'
 #U, S, V = torch.svd(all_hhats_cat_c.t())
 
 folder = 'registered_results'
-if 0:
+if 1:
     mean_x = all_xs_cat.mean(0, keepdim=True)
     all_xs_cat_c = (all_xs_cat - mean_x).view(all_xs_cat.size(0), -1)
 
@@ -221,7 +221,7 @@ if 0:
 
         mmds = []
         for n in range(num_samples): 
-            random_coefs = torch.from_numpy(GMM_realdata.sample(n_samples=500)[0]).float().cuda()
+            random_coefs = torch.from_numpy(GMM_realdata.sample(n_samples=1700)[0]).float().cuda()
             random_pcadata = torch.matmul(W, random_coefs.t()).t().contiguous().view(-1, 456, 320) + mean_x
 
             mmds.append(compute_mmd(random_pcadata.view(random_pcadata.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
@@ -232,59 +232,7 @@ if 0:
 
     if not os.path.exists(folder):
             os.mkdir(folder)
-    pickle.dump([all_stats, all_mmds], open(folder + '/pca.pk', 'wb'))
-
-
-if 0:
-    mdl.train(mode=False)
-    mdl.eval()
-
-    print('evaluating conv net..')
-    all_mmds = []
-    all_stats = []
-    num_samples = 5
-    for J in range(1, 60, 5):
-        print(J)
-        GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
-                                          verbose=1, n_init=10)
-        GMM.fit(all_hhats_cat.squeeze().cpu().numpy()) 
-
-        mmds = [] 
-        for n in range(num_samples):
-            print(n)
-            seed = torch.from_numpy(GMM.sample(500)[0]).float().cuda()
-
-            gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
-
-            mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
-
-        all_mmds.append( (mmds, J) )
-        all_stats.append( (np.mean(mmds), np.std(mmds), J) )
-        print(all_mmds)
-        print(all_stats)
-
-    if not os.path.exists(folder):
-            os.mkdir(folder)
     pickle.dump([all_stats, all_mmds], open(folder + '/conv_net.pk', 'wb'))
-
-    print('computing vae scores')
-    num_samples = 5
-    mdl.train(mode=False)
-    mdl.eval()
-
-    mmds = [] 
-    for n in range(num_samples):
-        print(n)
-        seed = torch.randn(500, 100).cuda()
-
-        gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
-
-        mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
-
-    if not os.path.exists(folder):
-            os.mkdir(folder)
-    pickle.dump(mmds, open(folder + '/vae.pk', 'wb'))
-
 
 
         #st_pcadata = random_pcadata.std(0).view(456, 320)

@@ -22,6 +22,7 @@ import nrrd
 import skimage.feature as skf
 import socket
 import time
+import skimage.draw as skd
 
 vis = visdom.Visdom(port=0, server='http://yourserver', env='your_env2')
 assert vis.check_connection()
@@ -158,154 +159,101 @@ else:
         os.mkdir('mouse_embeddings')
     torch.save(dct, hhat_path)
 
+def add_blob_noise(data, nblobs):
+
+    data_np = data.cpu().numpy()
+    N = data.size(0)
+    for n in range(N):
+        #print(n)
+        for nblob in range(nblobs):
+            sh = np.random.randint(-100, 100)
+            circle = skd.circle(200 +sh, 200 +sh, 10, shape=(456, 320))
+            data_np[n, circle[0], circle[1]] = -1
+    return torch.from_numpy(data_np)
+
 shared_path = '/your_path/25um_280_to_290_slices/misc_files_from_urbana/'
 
-#J = 30
-#GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
-#                                  verbose=1, n_init=10)
-#GMM.fit(all_hhats_cat.squeeze().cpu().numpy()) 
-#
-#zhat = GMM.predict(all_hhats_cat)
-#
-#
-#nclst = np.zeros(J)
-#for j in range(J):
-#    nclst[j] = (zhat == j).sum()
-#
-#clsts = np.argsort(nclst)
-#
-#plt.figure(figsize=(12, 10), dpi=100) 
-#J = 10
-#for i, clst in enumerate(clsts[:10]):
-#    inds = torch.from_numpy(np.where(zhat == clst)[0]).cuda()
-#
-#    images = torch.index_select(all_xs_cat.squeeze().permute(0, 2, 1), dim=0, index=inds)
-#
-#    plt.subplot(J, 1, i+1)
-#    ims = ut.collate_images_rectangular(images, 8, ncols=8, L1=320, L2=456)
-#
-#    plt.imshow(ims, interpolation=None)
-#
-#plt.savefig('mouse_results/clusterings.png', format='png')
-#plt.savefig(shared_path + 'clusterings.eps', format='eps')
-    
+folder = 'outlier'
+if 1:
+    train_data = all_xs_cat[:1500]
+    test_data = all_xs_cat[1500:]
 
-#mean_hhat = all_hhats_cat.mean(0, keepdim=True)
-#all_hhats_cat_c = all_hhats_cat - mean_hhat
-#
-#U, S, V = torch.svd(all_hhats_cat_c.t())
+    mean_x = train_data.mean(0, keepdim=True)
+    train_data_c = (train_data - mean_x).view(train_data.size(0), -1)
 
-folder = 'registered_results'
-if 0:
-    mean_x = all_xs_cat.mean(0, keepdim=True)
-    all_xs_cat_c = (all_xs_cat - mean_x).view(all_xs_cat.size(0), -1)
-
-    Ureal, Sreal, _ = torch.svd(all_xs_cat_c.t())
+    Ureal, Sreal, _ = torch.svd(train_data_c.t())
 
     mdl.train(mode=False)
     mdl.eval()
 
     W = Ureal[:, :100] 
-    pca_coefs = torch.matmul(W.t(), all_xs_cat_c.t()).t()
+    pca_coefs = torch.matmul(W.t(), train_data_c.t()).t()
 
-    recons = torch.matmul(W, pca_coefs.t()).t().contiguous().view(-1, 456, 320) + mean_x
+    GMM_realdata = mix.GaussianMixture(n_components=10, covariance_type='full', tol=1e-4, 
+                                      verbose=1, n_init=10)
+    GMM_realdata.fit(pca_coefs.cpu().numpy())
 
-    all_mmds = []
-    all_stats = []
-    num_samples = 5
-    for J in range(1, 60, 5):
-        print(J)
-        GMM_realdata = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
-                                          verbose=1, n_init=10)
-        GMM_realdata.fit(pca_coefs.cpu().numpy())
+    z_testdata = torch.matmul(W.t(), (test_data - mean_x).view(test_data.size(0),-1).t()).t()
+    GMM_scores_test = GMM_realdata.score(z_testdata.cpu().numpy())
 
-        mmds = []
-        for n in range(num_samples): 
-            random_coefs = torch.from_numpy(GMM_realdata.sample(n_samples=500)[0]).float().cuda()
-            random_pcadata = torch.matmul(W, random_coefs.t()).t().contiguous().view(-1, 456, 320) + mean_x
+    all_outscores_pca = []
+    nsample = 1
 
-            mmds.append(compute_mmd(random_pcadata.view(random_pcadata.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
-        all_mmds.append( (mmds, J) )
-        all_stats.append( (np.mean(mmds), np.std(mmds), J) )
-        print(all_mmds)
-        print(all_stats)
+    for nblobs in range(2, 3):
+        print(nblobs)
+        scores = []
+        for ns in range(nsample):
+            outlier_data = add_blob_noise(test_data, nblobs).cuda()    
+
+            z_outdata = torch.matmul(W.t(), (outlier_data - mean_x).view(test_data.size(0),-1).t()).t()
+            scores.append(GMM_realdata.score(z_outdata.cpu().numpy()))
+        all_outscores_pca.append( (scores, nblobs))
+
+    
+    pdb.set_trace()
+    plt.figure(figsize=(4, 3), dpi=100)
+    plt.imshow(outlier_data[0].cpu().t())
+    plt.xticks([])
+    plt.yticks([])
+    plt.savefig('/your_path/GANs/mouse_project/outlier_example.eps')
+    pdb.set_trace()
+
+
+        #ims=ut.collate_images_rectangular(outlier_data[:16], N=16, ncols=4, L1=456, L2=320)
+        #vis.heatmap(ims, win='out_data')
 
     if not os.path.exists(folder):
             os.mkdir(folder)
-    pickle.dump([all_stats, all_mmds], open(folder + '/pca.pk', 'wb'))
-
+    #pickle.dump([all_outscores_pca, GMM_scores_test], open(folder + '/pca.pk', 'wb'))
 
 if 0:
+    train_coefs = all_hhats_cat[:1500]
+    test_coefs = all_hhats_cat[1500:]
+    test_data = all_xs_cat[1500:]
+
     mdl.train(mode=False)
     mdl.eval()
 
-    print('evaluating conv net..')
-    all_mmds = []
-    all_stats = []
-    num_samples = 5
-    for J in range(1, 60, 5):
-        print(J)
-        GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
-                                          verbose=1, n_init=10)
-        GMM.fit(all_hhats_cat.squeeze().cpu().numpy()) 
+    GMM_realdata = mix.GaussianMixture(n_components=10, covariance_type='full', tol=1e-4, 
+                                      verbose=1, n_init=10)
+    GMM_realdata.fit(train_coefs.cpu().numpy())
 
-        mmds = [] 
-        for n in range(num_samples):
-            print(n)
-            seed = torch.from_numpy(GMM.sample(500)[0]).float().cuda()
+    GMM_scores_test = GMM_realdata.score(test_coefs.cpu().numpy())
 
-            gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
+    all_outscores_conv = []
+    nsample = 5
 
-            mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
+    for nblobs in range(1, 5):
+        print(nblobs)
+        scores = []
+        for ns in range(nsample):
+            outlier_data = add_blob_noise(test_data, nblobs).cuda()    
 
-        all_mmds.append( (mmds, J) )
-        all_stats.append( (np.mean(mmds), np.std(mmds), J) )
-        print(all_mmds)
-        print(all_stats)
+            z_outdata = nn.parallel.data_parallel(mdl.encoder, Variable(outlier_data.unsqueeze(1)), range(arguments.num_gpus))
+            scores.append(GMM_realdata.score(z_outdata.data.squeeze().cpu().numpy()[:, :100]))
+        all_outscores_conv.append( (scores, nblobs))
 
     if not os.path.exists(folder):
             os.mkdir(folder)
-    pickle.dump([all_stats, all_mmds], open(folder + '/conv_net.pk', 'wb'))
-
-    print('computing vae scores')
-    num_samples = 5
-    mdl.train(mode=False)
-    mdl.eval()
-
-    mmds = [] 
-    for n in range(num_samples):
-        print(n)
-        seed = torch.randn(500, 100).cuda()
-
-        gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
-
-        mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
-
-    if not os.path.exists(folder):
-            os.mkdir(folder)
-    pickle.dump(mmds, open(folder + '/vae.pk', 'wb'))
-
-
-
-        #st_pcadata = random_pcadata.std(0).view(456, 320)
-        #vis.heatmap(st_pcadata.cpu(), win='st_pca')
-
-        #opts = {'xmin': -1, 'xmax': 1}
-
-        #im_randompcas = ut.collate_images_rectangular(random_pcadata, 32, 4, L1=456, L2=320)
-        #vis.heatmap(im_randompcas, win='random_pca', opts=opts)
-
- 
-
-#pca_recons = ut.collate_images_rectangular(recons, 16, 4, L1=456, L2=320)
-#vis.heatmap(pca_recons, win='pca_recons')
-#
-#nnet_recons = ut.collate_images_rectangular(all_xhats_cat, 16, 4, L1=456, L2=320)
-#vis.heatmap(nnet_recons, win='nnet_recons')
-#
-#real_data = ut.collate_images_rectangular(all_xs_cat, 16, 4, L1=456, L2=320)
-#vis.heatmap(real_data, win='real_data')
-#
-
-
+    pickle.dump([all_outscores_conv, GMM_scores_test], open(folder + '/convnet.pk', 'wb'))
 

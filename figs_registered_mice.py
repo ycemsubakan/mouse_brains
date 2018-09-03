@@ -160,41 +160,6 @@ else:
 
 shared_path = '/your_path/25um_280_to_290_slices/misc_files_from_urbana/'
 
-#J = 30
-#GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
-#                                  verbose=1, n_init=10)
-#GMM.fit(all_hhats_cat.squeeze().cpu().numpy()) 
-#
-#zhat = GMM.predict(all_hhats_cat)
-#
-#
-#nclst = np.zeros(J)
-#for j in range(J):
-#    nclst[j] = (zhat == j).sum()
-#
-#clsts = np.argsort(nclst)
-#
-#plt.figure(figsize=(12, 10), dpi=100) 
-#J = 10
-#for i, clst in enumerate(clsts[:10]):
-#    inds = torch.from_numpy(np.where(zhat == clst)[0]).cuda()
-#
-#    images = torch.index_select(all_xs_cat.squeeze().permute(0, 2, 1), dim=0, index=inds)
-#
-#    plt.subplot(J, 1, i+1)
-#    ims = ut.collate_images_rectangular(images, 8, ncols=8, L1=320, L2=456)
-#
-#    plt.imshow(ims, interpolation=None)
-#
-#plt.savefig('mouse_results/clusterings.png', format='png')
-#plt.savefig(shared_path + 'clusterings.eps', format='eps')
-    
-
-#mean_hhat = all_hhats_cat.mean(0, keepdim=True)
-#all_hhats_cat_c = all_hhats_cat - mean_hhat
-#
-#U, S, V = torch.svd(all_hhats_cat_c.t())
-
 folder = 'registered_results'
 if 0:
     mean_x = all_xs_cat.mean(0, keepdim=True)
@@ -205,45 +170,88 @@ if 0:
     mdl.train(mode=False)
     mdl.eval()
 
-    W = Ureal[:, :100] 
+    W = Ureal[:, :500] 
     pca_coefs = torch.matmul(W.t(), all_xs_cat_c.t()).t()
 
     recons = torch.matmul(W, pca_coefs.t()).t().contiguous().view(-1, 456, 320) + mean_x
 
-    all_mmds = []
-    all_stats = []
-    num_samples = 5
-    for J in range(1, 60, 5):
-        print(J)
-        GMM_realdata = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
+    J = 30
+    GMM_realdata = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
                                           verbose=1, n_init=10)
-        GMM_realdata.fit(pca_coefs.cpu().numpy())
+    GMM_realdata.fit(pca_coefs.cpu().numpy())
 
-        mmds = []
-        for n in range(num_samples): 
-            random_coefs = torch.from_numpy(GMM_realdata.sample(n_samples=500)[0]).float().cuda()
-            random_pcadata = torch.matmul(W, random_coefs.t()).t().contiguous().view(-1, 456, 320) + mean_x
+    random_coefs = torch.from_numpy(GMM_realdata.sample(n_samples=30)[0]).float().cuda()
+    random_pcadata = torch.matmul(W, random_coefs.t()).t().contiguous().view(-1, 456, 320) + mean_x
 
-            mmds.append(compute_mmd(random_pcadata.view(random_pcadata.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
-        all_mmds.append( (mmds, J) )
-        all_stats.append( (np.mean(mmds), np.std(mmds), J) )
-        print(all_mmds)
-        print(all_stats)
+    random_pcadata[random_pcadata > 1] = 1
+    random_pcadata[random_pcadata < -1] = -1
+
+    ims = ut.collate_images_rectangular(random_pcadata.permute(0, 2, 1), 16, ncols=4, L1=320, L2=456)
+    ims_real = ut.collate_images_rectangular(all_xs_cat.permute(0, 2, 1), 16, ncols=4, L1=320, L2=456)
+
+    #vis.heatmap(ims, win='rpca')
+    ims = ims.numpy()
+    imreal_np = ims_real.numpy()
+    
+    #random_pcadata_np = random_pcadata.squeeze().permute(1, 2, 0).cpu().numpy()
+    pdb.set_trace()
+
+    plt.figure(figsize=(12, 16), dpi=120)
+    plt.imshow(np.flipud(ims))
+    plt.savefig('/your_path/GANs/mouse_project/highres_pca.eps', format='eps')
+
+    plt.figure(figsize=(12, 16), dpi=120)
+    plt.imshow(np.flipud(imreal_np))
+    plt.savefig('/your_path/GANs/mouse_project/real_data_registered.eps', format='eps')
+
+    #nrrd.write(shared_path + 'high_resolution_pca_registed.nrrd', random_pcadata_np)
+
+    pdb.set_trace()
+if 0:    
+
+    print('computing vae scores')
+    num_samples = 1
+    mdl.train(mode=False)
+    mdl.eval()
+
+    mmds = [] 
+    for n in range(num_samples):
+        print(n)
+        seed = torch.randn(500, 100).cuda()
+
+        gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
+
+        mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
+
+    ims = ut.collate_images_rectangular(gen_data.squeeze().permute(0, 2, 1), 16, ncols=4, L1=320, L2=456).cpu().numpy()
+
+    plt.figure(figsize=(12, 16), dpi=120)
+    plt.imshow(np.flipud(ims))
+    plt.savefig('/your_path/GANs/mouse_project/vae_gens_registered.eps', format='eps')
+
+
 
     if not os.path.exists(folder):
             os.mkdir(folder)
-    pickle.dump([all_stats, all_mmds], open(folder + '/pca.pk', 'wb'))
+    pickle.dump(mmds, open(folder + '/vae.pk', 'wb'))
+
+    #gen_data_vae = gen_data[:20].squeeze().permute(1, 2, 0).cpu().numpy()
+    #nrrd.write(shared_path + 'vae_registered.nrrd', gen_data_vae)
+
+    pdb.set_trace()
 
 
-if 0:
+
+
+if 1:
     mdl.train(mode=False)
     mdl.eval()
 
     print('evaluating conv net..')
     all_mmds = []
     all_stats = []
-    num_samples = 5
-    for J in range(1, 60, 5):
+    num_samples = 1
+    for J in range(30, 31, 5):
         print(J)
         GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
                                           verbose=1, n_init=10)
@@ -267,23 +275,11 @@ if 0:
             os.mkdir(folder)
     pickle.dump([all_stats, all_mmds], open(folder + '/conv_net.pk', 'wb'))
 
-    print('computing vae scores')
-    num_samples = 5
-    mdl.train(mode=False)
-    mdl.eval()
+    ims = ut.collate_images_rectangular(gen_data.squeeze().permute(0, 2, 1), 16, ncols=4, L1=320, L2=456).cpu().numpy()
 
-    mmds = [] 
-    for n in range(num_samples):
-        print(n)
-        seed = torch.randn(500, 100).cuda()
-
-        gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
-
-        mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
-
-    if not os.path.exists(folder):
-            os.mkdir(folder)
-    pickle.dump(mmds, open(folder + '/vae.pk', 'wb'))
+    plt.figure(figsize=(12, 16), dpi=120)
+    plt.imshow(np.flipud(ims))
+    plt.savefig('/your_path/GANs/mouse_project/iml_gens_registered.eps', format='eps')
 
 
 

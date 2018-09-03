@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from algorithms_v2 import netD, netG, adversarial_trainer, VAE, NF_changedim, compute_nparam_density, conv_autoenc_mice, netg_dcgan, netd_dcgan, conv_VAE_mouse, conv_VAE_mouse_v2, adversarial_wasserstein_trainer, netd_dcgan_par, netg_dcgan_par, weights_init_seq, get_scores
+from algorithms_v2 import netD, netG, adversarial_trainer, VAE, NF_changedim, compute_nparam_density, conv_autoenc_mice, netg_dcgan, netd_dcgan, conv_VAE_mouse, conv_VAE_mouse_v3, adversarial_wasserstein_trainer, netd_dcgan_par, netg_dcgan_par, weights_init_seq, get_scores
 import pdb
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
@@ -22,9 +22,10 @@ import nrrd
 import skimage.feature as skf
 import socket
 import time
+import torchvision
 
-vis = visdom.Visdom(port=0, server='http://yourserver', env='your_env2')
-assert vis.check_connection()
+#vis = visdom.Visdom(port=0, server='http://yourserver', env='your_env2')
+#assert vis.check_connection()
 
 argparser = argparse.ArgumentParser()
 argparser.add_argument('--num_gpus', type=int, help='number of gpus', default=2)
@@ -35,46 +36,28 @@ np.random.seed(2)
 torch.manual_seed(9)
 arguments.cuda = torch.cuda.is_available()
 arguments.batch_size = 128
-arguments.data = 'mice_norm2'
+arguments.data = 'mice_nonregistered'
 arguments.input_type = 'autoenc'
 
 home = os.path.expanduser('~')
 hostname = socket.gethostname()
 
+
 if hostname == 'nmf':
-    train_data_dir = '/your_root/data2/mice_data.t'
-    mask_dir = '/your_root/data2/mice_data_masks.t'
+    train_data_dir = '/your_root/data2/unregistered_images/'
 elif hostname == 'cem-gpu':
-    train_data_dir = home + '/mouse_data/mice_data.t'
-    mask_dir = home + '/mouse_data/mice_data_masks.t'
+    train_data_dir = '/home/cem/unregistered_images/'
 
 
-data = torch.load(open(train_data_dir, 'rb'))
-data = data.unsqueeze(1)
-
-masks = torch.load(open(mask_dir, 'rb'))[0]
-
-if arguments.data == 'mice':
-    im_max = 400
-    data[data > im_max] = im_max
-    data = data / im_max
-    data = 2*data - 1
-else:
-    im_max = 800
-    data[data > im_max] = im_max
-
-    data = data**0.5
-
-    vecims = data.view(data.size(0), -1)
-    im_max = vecims.max(1)[0].view(-1, 1, 1, 1)
-
-    data = data / im_max
-    data = 2*data - 1
-
-dset_train = torch.utils.data.TensorDataset(data, data)
+transform = transforms.Compose([
+        #transforms.Grayscale(),
+        transforms.Resize(size=(320, 456)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+        ])
+dset_train = datasets.ImageFolder(train_data_dir, transform=transform)
 train_loader = torch.utils.data.DataLoader(dset_train, batch_size=24, shuffle=True,
                                            pin_memory=True, num_workers=arguments.num_gpus)
-
 
 compute_kdes = 0
 compute_lbp = 1
@@ -107,32 +90,25 @@ if model == 'NF':
             
 elif model == 'VAE': 
     EP = 25
-    Ks = [100, 100]
+    Ks = [200, 200]
     L = 456*320
         
-    mdl = conv_VAE_mouse_v2(L, L, Ks, M=64, num_gpus=arguments.num_gpus) 
+    mdl = conv_VAE_mouse_v3(320, 456, Ks, M=64, num_gpus=arguments.num_gpus) 
        
     if arguments.cuda:
         mdl.cuda()
 
-    model_desc = 'VAE_arc3_l1'
-    path = 'models/' + model_desc + '_{}_K_{}.t'.format(arguments.data, Ks)
+    path = 'models/VAE_arc5_l1_{}_K_{}.t'.format(arguments.data, Ks)
     if 1 & os.path.exists(path):
         mdl.load_state_dict(torch.load(path))
 
 nbatches = 75 
-hhat_path = 'mouse_embeddings/' + 'hats.t'
+hhat_path = 'mouse_embeddings/' + 'hats_unregistered.t'
 if 1 & os.path.exists(hhat_path):
     all_xs = []
-    for i, (data, _) in enumerate(it.islice(train_loader, 0, nbatches, 1)):
-        if arguments.cuda:
-            data = data.cuda()
-
-        all_xs.append(data.squeeze())
-        print(i)
     dcts = torch.load(hhat_path)
 
-    all_xs_cat = torch.cat(all_xs, dim=0)
+    #all_xs_cat = torch.cat(all_xs, dim=0)
     all_hhats_cat = dcts['hhats']
     all_xhats_cat = dcts['xhats']
 
@@ -143,19 +119,21 @@ else:
     for i, (data, _) in enumerate(it.islice(train_loader, 0, nbatches, 1)):
         if arguments.cuda:
             data = data.cuda()
+        if 1:
+            data = data[:, :2, :, :]
 
         hhat = nn.parallel.data_parallel(mdl.encoder, Variable(data), range(arguments.num_gpus))
-        xhat = nn.parallel.data_parallel(mdl.decoder, hhat[:, :100], range(arguments.num_gpus))
+        xhat = nn.parallel.data_parallel(mdl.decoder, hhat[:, :Ks[0]], range(arguments.num_gpus))
         all_hhats.append(hhat.data.squeeze())
         all_xhats.append(xhat.data.squeeze())
         all_xs.append(data.squeeze())
         print(i)
-    all_hhats_cat = torch.cat(all_hhats, dim=0)[:, :100]
-    all_xhats_cat = torch.cat(all_xhats, dim=0) 
-    all_xs_cat = torch.cat(all_xs, dim=0)
+    all_hhats_cat = torch.cat(all_hhats, dim=0)[:, :Ks[0]]
+    #all_xhats_cat = torch.cat(all_xhats, dim=0) 
+    #all_xs_cat = torch.cat(all_xs, dim=0)
 
     dct = {'hhats' : all_hhats_cat, 
-           'xhats' : all_xhats_cat}
+           'xhats' : []}
     if not os.path.exists('mouse_embeddings'):
         os.mkdir('mouse_embeddings')
     torch.save(dct, hhat_path)
@@ -167,78 +145,95 @@ all_hhats_cat_c = all_hhats_cat - mean_hhat
 
 U, S, V = torch.svd(all_hhats_cat_c.t())
 
-mean_x = all_xs_cat.mean(0, keepdim=True)
-all_xs_cat_c = (all_xs_cat - mean_x).view(all_xs_cat.size(0), -1)
+#mean_x = all_xs_cat.mean(0, keepdim=True)
+#all_xs_cat_c = (all_xs_cat - mean_x).view(all_xs_cat.size(0), -1)
 
-Ureal, _, _ = torch.svd(all_xs_cat_c.t())
+#Ureal, _, _ = torch.svd(all_xs_cat_c.t())
+plt.figure(figsize=(42, 20), dpi=120)
+
 tweak_mode = 2
 
 mdl.train(mode=False)
 mdl.eval()
 
-if tweak_mode == 1:
-    alpha = torch.arange(-20, 20, 4)
+alpha = torch.arange(-10, 10, 2)
 
-    all_acts = []
-    for k in range(5):
-        acts = (U[:, k].unsqueeze(1) * alpha.unsqueeze(0).cuda()).t() + mean_hhat
-        all_acts.append(acts.unsqueeze(-1).unsqueeze(-1))
-    all_acts_cat = torch.cat(all_acts, 0)
+tweaks = []
+for k in range(10):
+    acts = (U[:, k].unsqueeze(1) * alpha.unsqueeze(0).cuda()).t() + mean_hhat
+    acts = acts.unsqueeze(-1).unsqueeze(-1)
+    tweaks.append(mdl.decoder(Variable(acts)).data)
 
-    tweaks = mdl.decoder(Variable(all_acts_cat))
+tweaks_cat = torch.cat(tweaks, dim=0)
+tweaks_cat = torch.cat([tweaks_cat, -torch.ones(tweaks_cat.size(0), 1, 320, 456).cuda()], dim=1)
 
-    im = ut.collate_images_rectangular(tweaks.data, 50, 10, L1=456, L2=320)
+im1 = ut.collate_images_rectangular_color(tweaks_cat.data, 100, 10, L1=320, L2=456)
 
-    plt.figure(figsize=(30, 20), dpi=120) 
-    plt.imshow(np.flipud(im), interpolation='None')
-    plt.savefig('mouse_results/tweak_images_v1.png', format='png')
-    nrrd.write(shared_path + 'tweak_images.nrrd', tweaks.data.cpu().squeeze().permute(1, 2, 0).numpy())
+plt.subplot2grid((1,11),(0,0), colspan=9)
+plt.imshow(0.5*im1 + 0.5)
 
-else: 
-    alpha = torch.randn(100)*10
-
-    Ncomps = 30
-    plt.figure(figsize=(24, 16), dpi=120)
-
-    all_acts = []
-    all_tweaks = []
-    all_real_comps = []
-    for k in range(Ncomps):
-        print(k)
-        acts = (U[:, k].unsqueeze(1) * alpha.unsqueeze(0).cuda()).t() + mean_hhat
-        outs = nn.parallel.data_parallel(mdl.decoder, Variable(acts.unsqueeze(-1).unsqueeze(-1)), range(arguments.num_gpus))
-        all_tweaks.append(outs.std(0).data)
-
-        #plt.subplot(4, 5, k+1)
-        #plt.imshow(all_tweaks[k].cpu().squeeze().t().numpy(), interpolation='None')
-        #plt.title('Component {}'.format(k+1))
-        #plt.xticks([])
-        #plt.yticks([])
-
-    all_tweaks_cat = torch.cat(all_tweaks, dim=0).squeeze().permute(1,2,0).cpu().numpy()
-    nrrd.write(shared_path + 'tweak_images.nrrd', all_tweaks_cat)
-
-    pdb.set_trace()
-
-    plt.tight_layout()
-    plt.savefig('mouse_results/tweak_images_v2.png', format='png')
-    plt.savefig(shared_path + 'tweak_images_v2.eps', format='eps')
-
-    plt.figure(figsize=(24, 16), dpi=120)
-    for k in range(Ncomps):
-        st_image = (Ureal[:, k].view(1, 456, 320)*(alpha.view(-1, 1, 1).cuda()) + mean_x).std(0) 
-        all_real_comps.append(st_image)
-
-        plt.subplot(4, 5, k+1)
-        plt.imshow(all_real_comps[k].cpu().t().numpy(), interpolation='None')
-        plt.title('Component {}'.format(k+1))
-        plt.xticks([])
-        plt.yticks([])
-
-    plt.savefig('mouse_results/pca_realdata_correct.png', format='png')
-    plt.savefig(shared_path + 'pca_realdata_correct.eps', format='eps')
+plt.xticks([])
+plt.yticks([])
 
 
+#plt.figure(figsize=(30, 20), dpi=120) 
+#torchvision.utils.save_image(0.5*tweaks_cat.data.cpu() + 0.5, '/your_path/GANs/mouse_project/tweak_images.png', nrow=10, padding=2)
+#plt.imshow(0.5*im + 0.5, interpolation='None')
+    #plt.savefig('mouse_results/tweak_images_unregistered.png', format='png')
+    
+    
+#nrrd.write(shared_path + 'tweak_images.nrrd', tweaks.data.cpu().squeeze().permute(1, 2, 0).numpy())
+
+alpha = torch.randn(80)*10
+
+Ncomps = 10 
+#plt.figure(figsize=(40, 10), dpi=120)
+
+all_acts = []
+all_tweaks = []
+all_real_comps = []
+for k in range(Ncomps):
+    print(k)
+    acts = (U[:, k].unsqueeze(1) * alpha.unsqueeze(0).cuda()).t() + mean_hhat
+    outs = nn.parallel.data_parallel(mdl.decoder, Variable(acts.unsqueeze(-1).unsqueeze(-1)), range(arguments.num_gpus))
+    all_tweaks.append(outs.mean(1).std(0).data)
+
+all_st_tweaks_cat = torch.cat(all_tweaks, dim=0)
+
+plt.subplot2grid((1,11), (0, 9))
+plt.imshow(all_st_tweaks_cat)
+plt.xticks([])
+plt.yticks([])
+    #plt.subplot(2, 5, k+1)
+    #plt.imshow(all_tweaks[k].cpu().squeeze().t().numpy(), interpolation='None')
+#plt.title('Component {}'.format(k+1), fontsize=25)
+#plt.xticks([])
+#plt.yticks([])
+
+#all_tweaks_cat = torch.cat(all_tweaks, dim=0).squeeze().permute(1,2,0).cpu().numpy()
+#nrrd.write(shared_path + 'tweak_images.nrrd', all_tweaks_cat)
+
+plt.tight_layout()
+plt.savefig('/your_path/GANs/mouse_project/tweak_images_unregistered_v2.png', format='png')
+#plt.savefig(shared_path + 'tweak_images_v2.eps', format='eps')
+
+pdb.set_trace()
+
+#    plt.figure(figsize=(24, 16), dpi=120)
+#    for k in range(Ncomps):
+#        st_image = (Ureal[:, k].view(1, 456, 320)*(alpha.view(-1, 1, 1).cuda()) + mean_x).std(0) 
+#        all_real_comps.append(st_image)
+#
+#        plt.subplot(4, 5, k+1)
+#        plt.imshow(all_real_comps[k].cpu().t().numpy(), interpolation='None')
+#        plt.title('Component {}'.format(k+1))
+#        plt.xticks([])
+#        plt.yticks([])
+#
+#    plt.savefig('mouse_results/pca_realdata_correct.png', format='png')
+#    plt.savefig(shared_path + 'pca_realdata_correct.eps', format='eps')
+#
+#
 
 
 #vis.heatmap(im, win='tweaks', opts=opts)

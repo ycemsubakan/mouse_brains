@@ -22,6 +22,7 @@ import nrrd
 import skimage.feature as skf
 import socket
 import time
+import torchvision
 
 vis = visdom.Visdom(port=0, server='http://yourserver', env='your_env2')
 assert vis.check_connection()
@@ -63,6 +64,16 @@ dset_test = datasets.ImageFolder(train_data_dir, transform=transform)
 test_loader = torch.utils.data.DataLoader(dset_test, batch_size=24, shuffle=False,
                                           pin_memory=True, num_workers=arguments.num_gpus)
 
+for i, (unregdata, _) in enumerate(it.islice(train_loader, 0, 1, 1)):
+    pass
+unregdata[:, 2, :, :] = -1
+
+torchvision.utils.save_image(unregdata[:16], '/your_path/GANs/mouse_project/poster/unregistered_16.png', nrow=4)
+
+pdb.set_trace()
+
+
+
 # load the model
 Ks = [200, 200]
     
@@ -71,9 +82,9 @@ mdl = conv_VAE_mouse_v3(320, 456, Ks, M=64, num_gpus=arguments.num_gpus)
 if arguments.cuda:
     mdl.cuda()
 
-
 #model_desc = 'VAE_arc3_l1_lrelu_d48'
 model_desc = 'VAE_arc5_l1'
+
 path = 'models/' + model_desc + '_{}_K_{}.t'.format(arguments.data, Ks)
 if 1 & os.path.exists(path):
     mdl.load_state_dict(torch.load(path))
@@ -105,10 +116,11 @@ else:
             data = data.cuda()
 
         if 1:
-            data = data[:, :2, :, :] 
+            data = data[:, :2, :, :]
 
         hhat = nn.parallel.data_parallel(mdl.encoder, Variable(data), range(arguments.num_gpus))
         xhat = nn.parallel.data_parallel(mdl.decoder, hhat[:, :Ks[0]], range(arguments.num_gpus))
+
         all_hhats.append(hhat.data.squeeze())
         all_xhats.append(xhat.data.squeeze())
         all_xs.append(data.squeeze())
@@ -122,114 +134,67 @@ else:
         os.mkdir('mouse_embeddings')
     torch.save(dct, hhat_path)
 
+folder = '/your_path/GANs/mouse_project/'
 
-folder = 'unregistered_results'
-##### do pca see what happens
+##### pca 
+mean_x = all_xs_cat.mean(0, keepdim=True)
+all_xs_cat_c = (all_xs_cat - mean_x).view(all_xs_cat.size(0), -1)
 
-if arguments.dopca:
-    mean_x = all_xs_cat.mean(0, keepdim=True)
-    all_xs_cat_c = (all_xs_cat - mean_x).view(all_xs_cat.size(0), -1)
+Ureal, Sreal, _ = torch.svd(all_xs_cat_c.t().cpu())
 
-    Ureal, Sreal, _ = torch.svd(all_xs_cat_c.t().cpu())
+W = Ureal[:, :500].cuda()
+pca_coefs = torch.matmul(W.t(), all_xs_cat_c.t()).t()
 
-    W = Ureal[:, :200].cuda()
-    pca_coefs = torch.matmul(W.t(), all_xs_cat_c.t()).t()
+J = 56
+GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
+                                  verbose=1, n_init=10)
+GMM.fit(pca_coefs.squeeze().cpu().numpy()) 
 
-    recons = torch.matmul(W.cpu(), pca_coefs[:100].cpu().t()).t().contiguous().view(-1, 2, 320, 456) + mean_x.cpu()
+seed = torch.from_numpy(GMM.sample(16)[0]).float().cuda()
 
-    recons[recons>1] = 1
-    recons[recons<-1] = -1
+gen_data = torch.matmul(W, seed.t()).t().contiguous().view(-1, 2, 320, 456) + mean_x
+gen_data[gen_data>1] = 1
+gen_data[gen_data<-1] = -1
+gen_data = torch.cat([gen_data, -torch.ones(gen_data.size(0), 1, 320, 456).cuda()], dim=1)
 
-    #opts = {'title' : 'pca reconstructions'} 
-    #vis.images(recons*0.5 + 0.5, opts=opts) 
+Nims = 10
+ncols = 2
+collated_gen_data_pca = ut.collate_images_rectangular_color(gen_data, Nims, ncols=ncols, L1=320, L2=456)
 
-    all_mmds = []
-    all_stats = []
-    num_samples = 5
-    for J in range(1, 60, 5):
-        print(J)
-        GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
-                                          verbose=1, n_init=10)
-        GMM.fit(pca_coefs.squeeze().cpu().numpy()) 
-
-        mmds = [] 
-        for n in range(num_samples):
-            print(n)
-            seed = torch.from_numpy(GMM.sample(200)[0]).float().cuda()
-
-            gen_data = torch.matmul(W, seed.t()).t().contiguous().view(-1, 2, 320, 456) + mean_x
-            gen_data[gen_data>1] = 1
-            gen_data[gen_data<-1] = -1
-
-            mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
-
-        all_mmds.append( (mmds, J) )
-        all_stats.append( (np.mean(mmds), np.std(mmds), J) )
-        print(all_mmds)
-        print(all_stats)
-
-    if not os.path.exists(folder):
-        os.mkdir(folder)
-    pickle.dump([all_stats, all_mmds], open(folder + '/pca.pk', 'wb'))
-    
-    #opts = {'title' : 'pca randoms'}
-    #vis.images(gen_data.cpu()*0.5 + 0.5, opts=opts) 
-
-
+##conv net
 mdl.train(mode=False)
 mdl.eval()
 
-#vis.images(gen_data.data.cpu()*0.5 + 0.5) 
-if 1:
-    print('evaluating conv net..')
-    all_mmds = []
-    all_stats = []
-    num_samples = 5
-    for J in range(1, 60, 5):
-        print(J)
-        GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
-                                          verbose=1, n_init=10)
-        GMM.fit(all_hhats_cat.squeeze().cpu().numpy()) 
+GMM = mix.GaussianMixture(n_components=J, covariance_type='full', tol=1e-4, 
+                                  verbose=1, n_init=10)
+GMM.fit(all_hhats_cat.squeeze().cpu().numpy()) 
+seed = torch.from_numpy(GMM.sample(16)[0]).float().cuda()
 
-        mmds = [] 
-        for n in range(num_samples):
-            print(n)
-            batches = []
-            for l in range(5):
-                seed = torch.from_numpy(GMM.sample(100)[0]).float().cuda()
-
-                gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
-                batches.append(gen_data)
-
-            gen_data_cat = torch.cat(batches, dim=0)
-            mmds.append(compute_mmd(gen_data_cat.view(gen_data_cat.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1).item())
-
-        all_mmds.append( (mmds, J) )
-        all_stats.append( (np.mean(mmds), np.std(mmds), J) )
-        print(all_mmds)
-        print(all_stats)
-
-    if not os.path.exists(folder):
-            os.mkdir(folder)
-    pickle.dump([all_stats, all_mmds], open(folder + '/conv_net.pk', 'wb'))
+gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
+gen_data = torch.cat([gen_data, -torch.ones(gen_data.size(0), 1, 320, 456).cuda()], dim=1)
+collated_gen_data_conv = ut.collate_images_rectangular_color(gen_data, Nims, ncols=ncols, L1=320, L2=456)
 
 
-if 0:
-    print('computing vae scores..')
-    num_samples=5
-    mdl.train(mode=False)
-    mdl.eval()
+## conv net VAE
+gen_data, seed = mdl.generate_data(16)
+gen_data = gen_data.data
+gen_data = torch.cat([gen_data, -torch.ones(gen_data.size(0), 1, 320, 456).cuda()], dim=1)
+collated_gen_data_VAE = ut.collate_images_rectangular_color(gen_data, Nims, ncols=ncols, L1=320, L2=456)
 
-    mmds = [] 
-    for n in range(num_samples):
-        print(n)
-        seed = torch.randn(500, 200).cuda()
 
-        gen_data = nn.parallel.data_parallel(mdl.decoder, Variable(seed.unsqueeze(-1).unsqueeze(-1)) , range(arguments.num_gpus)).data
+# add the third dim and get the image
+all_xs_cat = torch.cat([all_xs_cat, -torch.ones(all_xs_cat.size(0), 1, 320, 456).cuda()], dim=1)
+collated_real_data = ut.collate_images_rectangular_color(all_xs_cat, Nims, ncols=ncols, L1=320, L2=456)
 
-        mmds.append(compute_mmd(gen_data.view(gen_data.size(0), -1), all_xs_cat.view(all_xs_cat.size(0), -1), cuda=arguments.cuda, kernel='linear', sig=1))
+seper = torch.ones(collated_real_data.size(0), 10, 3)
+all_ims_at_one = torch.cat([collated_real_data, seper, collated_gen_data_VAE, seper, collated_gen_data_conv, seper, collated_gen_data_pca], dim=1).cpu().numpy()
 
-    if not os.path.exists(folder):
-        os.mkdir(folder)
-    pickle.dump(mmds, open(folder + '/vae.pk', 'wb'))
+pdb.set_trace()
+
+plt.figure(figsize=(24, 20), dpi=100)
+plt.imshow(all_ims_at_one*0.5 + 0.5)
+plt.xticks([350, 1400, 2200, 3000], ['Real Data', 'VAE-CNN', 'IML-CNN', 'IML-PCA'], fontsize=35)
+plt.yticks([])
+
+plt.savefig(folder + 'gen_unregistered_v2.eps', format='eps')
 
